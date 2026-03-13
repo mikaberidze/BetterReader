@@ -25,42 +25,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 @MainActor
 final class AppController: NSObject {
-    private var statusItem: NSStatusItem?
     private var hotKeyController: HotKeyController?
     private var accessibilityPollingTimer: Timer?
     private var isCapturingSelection = false
     private let textRetrieval = TextRetrievalService()
-    private let debugWindowController = DebugWindowController()
+    private let readingWindowController = ReadingWindowController()
 
     func start() {
-        installStatusItem()
         prepareHotKey()
-    }
-
-    private func installStatusItem() {
-        let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(
-            systemSymbolName: "headphones",
-            accessibilityDescription: "BetterReader"
-        )
-        statusItem.button?.image?.isTemplate = true
-
-        let menu = NSMenu()
-
-        let openReader = NSMenuItem(title: "Open reader", action: nil, keyEquivalent: "")
-        openReader.isEnabled = false
-        menu.addItem(openReader)
-
-        let selectVoice = NSMenuItem(title: "Select voice", action: nil, keyEquivalent: "")
-        selectVoice.isEnabled = false
-        menu.addItem(selectVoice)
-
-        let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
-
-        statusItem.menu = menu
-        self.statusItem = statusItem
     }
 
     private func prepareHotKey() {
@@ -105,8 +77,13 @@ final class AppController: NSObject {
             return
         }
 
-        let controller = HotKeyController { [weak self] in
-            self?.handleOptionP()
+        let controller = HotKeyController { [weak self] action in
+            switch action {
+            case .togglePlayback:
+                self?.handleOptionP()
+            case .stopAndClose:
+                self?.handleOptionO()
+            }
         }
         guard controller.register() else {
             presentHotKeyInstallAlert()
@@ -127,17 +104,29 @@ final class AppController: NSObject {
         }
 
         isCapturingSelection = true
+        let sourceApplication = NSWorkspace.shared.frontmostApplication
 
         Task { @MainActor [weak self] in
             guard let self else {
                 return
             }
 
-            let selectedText =
-                await self.textRetrieval.selectedTextFromFocusedApp() ?? "No selected text found."
+            let selectedText = await self.textRetrieval.selectedTextFromFocusedApp()
             self.isCapturingSelection = false
-            self.debugWindowController.show(text: selectedText)
+
+            guard let selectedText else {
+                return
+            }
+
+            self.readingWindowController.present(
+                text: selectedText.preprocessedForSpeech(),
+                returningFocusTo: sourceApplication
+            )
         }
+    }
+
+    private func handleOptionO() {
+        readingWindowController.stopAndClose()
     }
 
     private func presentHotKeyInstallAlert() {
@@ -159,59 +148,19 @@ final class AppController: NSObject {
 
         NSWorkspace.shared.open(settingsURL)
     }
-
-    @objc private func quit() {
-        NSApp.terminate(nil)
-    }
 }
 
-@MainActor
-final class DebugWindowController {
-    private let window: NSWindow
-    private let textView: NSTextView
-
-    init() {
-        textView = NSTextView(frame: .zero)
-        textView.isEditable = false
-        textView.isSelectable = true
-        textView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        textView.textContainerInset = NSSize(width: 12, height: 12)
-        textView.string = "Press Option+P to print selected text."
-
-        let scrollView = NSScrollView(frame: .zero)
-        scrollView.hasVerticalScroller = true
-        scrollView.autohidesScrollers = true
-        scrollView.documentView = textView
-
-        window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 300),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "BetterReader Debug"
-        window.contentView = scrollView
-        window.isReleasedWhenClosed = false
-    }
-
-    func show(text: String) {
-        textView.string = text
-
-        if window.isVisible == false {
-            window.center()
-        }
-
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-    }
+enum GlobalHotKeyAction {
+    case togglePlayback
+    case stopAndClose
 }
 
 final class HotKeyController {
-    private let handler: @MainActor () -> Void
+    private let handler: @MainActor (GlobalHotKeyAction) -> Void
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
-    init(handler: @escaping @MainActor () -> Void) {
+    init(handler: @escaping @MainActor (GlobalHotKeyAction) -> Void) {
         self.handler = handler
     }
 
@@ -275,13 +224,13 @@ final class HotKeyController {
             return Unmanaged.passUnretained(event)
 
         case .keyDown:
-            guard isHijackedHotKey(event) else {
+            guard let action = hijackedAction(for: event) else {
                 return Unmanaged.passUnretained(event)
             }
 
             let handler = self.handler
             Task { @MainActor in
-                handler()
+                handler(action)
             }
             return nil
 
@@ -290,7 +239,7 @@ final class HotKeyController {
         }
     }
 
-    private func isHijackedHotKey(_ event: CGEvent) -> Bool {
+    private func hijackedAction(for event: CGEvent) -> GlobalHotKeyAction? {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let relevantFlags = event.flags.intersection([
             .maskShift,
@@ -299,6 +248,222 @@ final class HotKeyController {
             .maskAlternate,
         ])
 
-        return keyCode == Int64(kVK_ANSI_P) && relevantFlags == .maskAlternate
+        guard relevantFlags == .maskAlternate else {
+            return nil
+        }
+
+        switch keyCode {
+        case Int64(kVK_ANSI_P):
+            return .togglePlayback
+        case Int64(kVK_ANSI_O):
+            return .stopAndClose
+        default:
+            return nil
+        }
+    }
+}
+
+@MainActor
+final class ReadingWindowController: NSWindowController, NSWindowDelegate {
+    private let textView: NSTextView
+    private var hasCenteredWindow = false
+
+    init() {
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 700, height: 460))
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+
+        let textView = NSTextView(frame: scrollView.bounds)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = false
+        textView.usesFindBar = true
+        textView.font = .systemFont(ofSize: 16)
+        textView.textContainerInset = NSSize(width: 16, height: 20)
+        textView.minSize = .zero
+        textView.drawsBackground = false
+        textView.insertionPointColor = .clear
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.containerSize = NSSize(
+            width: scrollView.contentSize.width,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = true
+        scrollView.documentView = textView
+
+        self.textView = textView
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 460),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "BetterReader"
+        window.minSize = NSSize(width: 420, height: 260)
+        window.isReleasedWhenClosed = false
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.alphaValue = 0
+        window.collectionBehavior = [.moveToActiveSpace]
+        window.contentView = scrollView
+
+        super.init(window: window)
+        window.delegate = self
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func show() {
+        guard let window else {
+            return
+        }
+
+        if hasCenteredWindow == false {
+            window.center()
+            hasCenteredWindow = true
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        showWindow(nil)
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(textView)
+    }
+
+    func present(text: String, returningFocusTo sourceApplication: NSRunningApplication?) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else {
+            return
+        }
+
+        stopSpeaking()
+        textView.string = trimmed
+        show()
+
+        let selectedRange = NSRange(location: 0, length: (trimmed as NSString).length)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else {
+                return
+            }
+
+            self.textView.setSelectedRange(selectedRange)
+            self.textView.scrollRangeToVisible(selectedRange)
+            self.textView.startSpeaking(nil)
+            self.window?.orderOut(nil)
+            self.restoreFocus(to: sourceApplication)
+        }
+    }
+
+    func stopAndClose() {
+        stopSpeaking()
+        window?.orderOut(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        stopSpeaking()
+    }
+
+    private func stopSpeaking() {
+        textView.stopSpeaking(nil)
+    }
+
+    private func restoreFocus(to sourceApplication: NSRunningApplication?) {
+        guard let sourceApplication,
+            sourceApplication != NSRunningApplication.current,
+            sourceApplication.isTerminated == false
+        else {
+            return
+        }
+
+        sourceApplication.activate(options: [])
+    }
+}
+
+private extension String {
+    func preprocessedForSpeech() -> String {
+        var result = ""
+        var index = startIndex
+
+        while index < endIndex {
+            let character = self[index]
+
+            if character.isLineBreak {
+                result.trimTrailingInlineWhitespace()
+
+                let shouldJoinWithoutSpace = result.last?.isLineBreakHyphen == true
+
+                repeat {
+                    index = self.index(after: index)
+                } while index < endIndex && self[index].isLineBreak
+
+                while index < endIndex && self[index].isInlineWhitespace {
+                    index = self.index(after: index)
+                }
+
+                if shouldJoinWithoutSpace == false,
+                    result.isEmpty == false,
+                    index < endIndex
+                {
+                    result.append(" ")
+                }
+
+                continue
+            }
+
+            result.append(character)
+            index = self.index(after: index)
+        }
+
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    mutating func trimTrailingInlineWhitespace() {
+        while last?.isInlineWhitespace == true {
+            removeLast()
+        }
+    }
+}
+
+private extension Character {
+    private static let lineBreakHyphenCharacters: Set<Character> = [
+        "-",
+        "\u{2010}",  // hyphen
+        "\u{2011}",  // non-breaking hyphen
+        "\u{2012}",  // figure dash
+        "\u{2013}",  // en dash
+        "\u{2014}",  // em dash
+        "\u{2212}",  // minus sign
+        "\u{FE58}",  // small em dash
+        "\u{FE63}",  // small hyphen-minus
+        "\u{FF0D}",  // fullwidth hyphen-minus
+    ]
+
+    var isLineBreak: Bool {
+        unicodeScalars.allSatisfy { CharacterSet.newlines.contains($0) }
+    }
+
+    var isInlineWhitespace: Bool {
+        unicodeScalars.allSatisfy {
+            CharacterSet.whitespaces.contains($0) && !CharacterSet.newlines.contains($0)
+        }
+    }
+
+    var isLineBreakHyphen: Bool {
+        Self.lineBreakHyphenCharacters.contains(self)
     }
 }
