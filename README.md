@@ -1,7 +1,5 @@
 # BetterReader
 
-![BetterReader icon](icon.png)
-
 A small macOS utility that fixes a common problem with Text-to-Speech when reading PDFs.
 
 Many PDFs insert a newline at the end of every visual line. macOS Text-to-Speech interprets these line breaks as pauses, causing speech to stop at the end of each line and making listening difficult.
