@@ -6,13 +6,6 @@ Many PDFs insert a newline at the end of every visual line. macOS Text-to-Speech
 
 BetterReader acts as a **thin layer between selected text and macOS Text-to-Speech**, removing unnecessary newline characters before the text is spoken so sentences flow naturally.
 
-## Icon
-
-Put the source icon image at `icon.png` in the repository root. Use a square 1024x1024 PNG.
-
-- GitHub uses that same `icon.png` directly from the README.
-- The macOS app icon is generated from it by running `scripts/sync_icon.sh`.
-
 ## Usage
 
 1. Select text in any application (PDF reader, browser, editor, etc.).
