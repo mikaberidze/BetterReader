@@ -23,11 +23,12 @@ final class TextRetrievalService {
             return nil
         }
 
-        if let selectedText = selectedTextUsingAccessibility(for: pid) {
-            return selectedText
-        }
-
-        return await selectedTextBySimulatedCopy(for: pid)
+        let accessibilityText = selectedTextUsingAccessibility(for: pid)
+        let copiedText = await selectedTextBySimulatedCopy(for: pid)
+        return preferredSelectionText(
+            accessibilityText: accessibilityText,
+            copiedText: copiedText
+        )
     }
 
     private func focusedAppPID() -> pid_t? {
@@ -265,10 +266,115 @@ final class TextRetrievalService {
             try? await Task.sleep(nanoseconds: 15_000_000)
         }
     }
+
+    private func preferredSelectionText(
+        accessibilityText: String?,
+        copiedText: String?
+    ) -> String? {
+        switch (accessibilityText, copiedText) {
+        case let (lhs?, rhs?):
+            let lhsSignature = lhs.whitespaceInsensitiveSignature
+            let rhsSignature = rhs.whitespaceInsensitiveSignature
+
+            if lhsSignature == rhsSignature {
+                let lhsScore = lhs.separatorQualityScore
+                let rhsScore = rhs.separatorQualityScore
+
+                if lhsScore != rhsScore {
+                    return lhsScore > rhsScore ? lhs : rhs
+                }
+            }
+
+            return rhs.count > lhs.count ? rhs : lhs
+
+        case let (lhs?, nil):
+            return lhs
+
+        case let (nil, rhs?):
+            return rhs
+
+        case (nil, nil):
+            return nil
+        }
+    }
 }
 
 private extension String {
     var nilIfEmpty: String? {
         isEmpty ? nil : self
+    }
+
+    var whitespaceInsensitiveSignature: String {
+        unicodeScalars
+            .filter { CharacterSet.whitespacesAndNewlines.contains($0) == false }
+            .map(String.init)
+            .joined()
+    }
+
+    var separatorQualityScore: Int {
+        let characters = Array(self)
+        guard characters.isEmpty == false else {
+            return 0
+        }
+
+        var score = 0
+
+        for index in characters.indices {
+            let character = characters[index]
+
+            if character.isLineBreak {
+                score += 8
+
+                if index > characters.startIndex,
+                    characters[characters.index(before: index)].isLineBreak
+                {
+                    score += 4
+                }
+            }
+
+            guard index < characters.index(before: characters.endIndex) else {
+                continue
+            }
+
+            let nextCharacter = characters[characters.index(after: index)]
+
+            if character.isSentenceEndingPunctuation && nextCharacter.isInlineWhitespace {
+                score += 2
+            }
+
+            if character.isSentenceEndingPunctuation && nextCharacter.looksLikeSentenceStart {
+                score -= 10
+            }
+        }
+
+        return score
+    }
+}
+
+private extension Character {
+    var isLineBreak: Bool {
+        unicodeScalars.allSatisfy { CharacterSet.newlines.contains($0) }
+    }
+
+    var isInlineWhitespace: Bool {
+        unicodeScalars.allSatisfy {
+            CharacterSet.whitespaces.contains($0) && !CharacterSet.newlines.contains($0)
+        }
+    }
+
+    var isSentenceEndingPunctuation: Bool {
+        self == "." || self == "!" || self == "?" || self == ":" || self == ";"
+    }
+
+    var looksLikeSentenceStart: Bool {
+        unicodeScalars.allSatisfy { CharacterSet.uppercaseLetters.contains($0) }
+            || self == "\""
+            || self == "'"
+            || self == "\u{2018}"
+            || self == "\u{2019}"
+            || self == "\u{201C}"
+            || self == "\u{201D}"
+            || self == "("
+            || self == "["
     }
 }
