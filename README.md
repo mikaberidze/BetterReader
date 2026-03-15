@@ -20,10 +20,12 @@ Put the source icon image at `icon.png` in the repository root. Use a square 102
 3. Press **Option + O** to stop.
 
 ## Setup
+Option 1: Download the **BetterReader.app.zip** file, unzip and move to your Applications folder.  
+Option 2: Download the project and build the binary yourself. Move the it to your Applications folder.  
 
-After copying **BetterReader.app** to your Applications folder, you may need to configure a few things in macOS settings:
+Then you may need to configure a few things in macOS settings:
 
-- **Trust the app** if macOS warns that it is from an unidentified developer. The exact procedure varies a bit depending on the macOS version. For Tahoe 26.3,  
+- **Trust the app:** if macOS warns that it is from an unidentified developer. The exact procedure varies a bit depending on the macOS version. For Tahoe 26.3:  
   Allow it in *System Settings → Privacy & Security → Allow apps from: App Store & Known Developers*.  
   Then add me to the list of trusted developers.   
 - **Enable Accessibility permission** so the app can read selected text.  
